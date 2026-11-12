@@ -25,7 +25,21 @@ java -jar target/cogom-api-0.1.0-SNAPSHOT.jar
 
 ## API 계약
 
-[OpenAPI 명세](docs/openapi.yaml)를 Swagger Editor에서 열어 요청·응답 스키마와 화면별 계약을 확인할 수 있습니다. REST 헬스 체크와 WebSocket 스터디룸이 실행됩니다. OpenAPI에 적힌 나머지 REST 경로는 계약 초안입니다.
+[OpenAPI 명세](docs/openapi.yaml)에서 요청·응답 예시와 화면별 계약을 확인할 수 있습니다. 헬스 체크, 회원가입, 로그인, 내 계정 조회, WebSocket 스터디룸이 실행됩니다. 테이블과 라운드 REST 경로는 계약 초안입니다.
+
+### 회원가입과 로그인
+
+| 메서드와 경로 | 요청 | 성공 응답 |
+| --- | --- | --- |
+| `POST /api/v1/auth/signup` | `email`, `password`, `nickname` | `201` 및 `id`, `email`, `nickname` |
+| `POST /api/v1/auth/login` | `email`, `password` | `200` 및 `accessToken`, `tokenType`, `expiresIn`, `user` |
+| `GET /api/v1/auth/me` | `Authorization: Bearer <accessToken>` | `200` 및 `id`, `email`, `nickname` |
+
+회원가입과 로그인은 `Content-Type: application/json`으로 요청합니다. 프런트엔드는 Vite 프록시와 동일 출처 배포에서 상대 경로 `/api/v1/auth/...`를 사용합니다. 로그인으로 발급된 토큰은 30분간 유효하며, 프런트엔드 메모리에 보관하고 내 계정을 조회할 때 `Authorization` 헤더에 담습니다.
+
+계정은 기본적으로 실행 디렉터리의 `./data/cogom` H2 데이터베이스에 저장됩니다. 저장 위치를 바꾸려면 `COGOM_DB_URL`에 H2 JDBC URL을 지정합니다. 비밀번호는 Argon2id로 해시해 저장합니다.
+
+배포 환경에서는 HTTPS를 사용하고 `COGOM_JWT_SECRET`에 디코딩했을 때 32바이트 이상인 표준 Base64 서명 키를 설정합니다. 설정을 생략하면 서버 시작마다 임의의 키를 생성해 이전에 발급한 토큰은 재시작 후 검증할 수 없습니다.
 
 ## 실시간 스터디룸
 

@@ -1,0 +1,4 @@
+[mcp_servers.devlink]
+args = ['C:\Users\SSAFY\AppData\Local\Programs\devlink-desktop\resources\bin\mcp-server\dist\index.js', "--transport", "stdio"]
+command = 'C:\Users\SSAFY\AppData\Local\Programs\devlink-desktop\resources\node\node.exe'
+env = { DEVLINK_BROKER_FILE = 'C:\Users\SSAFY\.devlink\desktop\accounts\90451de68a2a880b9326a49f5ea1513c5dac223eebd52b1b9c6a7ed7e8ab20c3\8\teams\12\e4bc53e9886abeea\.devlink-runtime\broker.json' }

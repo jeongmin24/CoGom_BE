@@ -4,19 +4,31 @@ info:
   version: 0.1.0
   description: |
     초대 링크로 같은 테이블에 앉아 각자 목표를 세우고, 공유 타이머에 맞춰
-    25분 집중과 5분 휴식을 진행한다. 헬스 체크는 구현되어 있으며 테이블과
-    라운드 경로는 MVP 구현 계약이다.
+    25분 집중과 5분 휴식을 진행한다. 헬스 체크, 회원가입, 로그인, 내 계정 조회는
+    구현되어 있으며 테이블과 라운드 경로는 MVP 구현 계약이다.
 
     ## 화면과 요청
 
     | 화면 | 동작 | 요청 |
     | --- | --- | --- |
+    | 회원가입 | 계정 생성 | POST /auth/signup |
+    | 로그인 | 자격 증명 확인과 액세스 토큰 발급 | POST /auth/login |
+    | 계정 | 액세스 토큰으로 내 계정 조회 | GET /auth/me |
     | 카페 입구 | 링크로 테이블 이름, 좌석 수, 현재 단계 확인 | POST /invitations/preview |
     | 착석 | 닉네임과 목표 등록 | POST /invitations/join |
     | 집중 | 시작, 자리 비움·복귀, 휴식 때 도움 요청 | POST /tables/{tableId}/rounds, PUT .../presence, PUT .../help |
     | 휴식·회고 | 결과와 한 줄 메모 공유 | PUT .../review |
     | 다음 라운드 | 새 목표 준비 | PUT /tables/{tableId}/members/me/goal |
     | 테이블 공통 | 새로고침 복구, 상태 구독, 퇴장 | GET /tables/{tableId}, GET .../events, DELETE .../members/me |
+
+    ## 계정 인증
+
+    - 프런트엔드는 Vite 프록시 또는 동일 출처 배포에서 상대 경로 /api/v1/auth/...를 사용한다.
+      로그인으로 발급된 토큰은 메모리에 보관하고, 계정 조회 시 Authorization Bearer 헤더로 전송한다.
+    - 액세스 토큰은 30분간 유효한 HS256 JWT다. iss는 cogom-api, aud는 cogom-fe,
+      sub는 계정 UUID이며 iat와 exp에 발급 및 만료 시각을 담는다.
+    - 배포에는 HTTPS를 사용한다. COGOM_JWT_SECRET에는 디코딩 후 32바이트 이상인
+      표준 Base64 값을 지정한다. 생략하면 서버 시작마다 임의의 키를 생성한다.
 
     ## 세션과 동시성
 
@@ -55,6 +67,7 @@ security:
   - GuestCookie: []
 tags:
   - name: 운영
+  - name: 계정
   - name: 테이블
   - name: 라운드
 paths:
@@ -71,6 +84,123 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Health' }
               example: { status: UP, serverNow: '2026-11-11T11:00:00Z' }
+  /auth/signup:
+    post:
+      tags: [계정]
+      summary: 계정 생성
+      description: 로그인은 계정 생성 후 별도로 요청한다.
+      operationId: signup
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, password, nickname]
+              properties:
+                email: { $ref: '#/components/schemas/AccountEmailInput' }
+                password: { $ref: '#/components/schemas/SignupPasswordInput' }
+                nickname: { $ref: '#/components/schemas/AccountNicknameInput' }
+            example: { email: Jimin@example.com, password: 'correct horse battery staple', nickname: 지민 }
+      responses:
+        '201':
+          description: 계정 생성 완료
+          headers:
+            Cache-Control: { $ref: '#/components/headers/AuthCacheControl' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+              example: { id: 17010000-0000-4000-8000-000000000001, email: jimin@example.com, nickname: 지민 }
+        '400': { $ref: '#/components/responses/AuthValidationError' }
+        '409':
+          description: EMAIL_ALREADY_EXISTS. 정규화한 이메일이 이미 등록되어 있다.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/AuthCacheControl' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+              example: { code: EMAIL_ALREADY_EXISTS, message: 이미 가입된 이메일입니다. }
+        '415': { $ref: '#/components/responses/AuthUnsupportedMediaType' }
+  /auth/login:
+    post:
+      tags: [계정]
+      summary: 계정 로그인
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, password]
+              properties:
+                email: { $ref: '#/components/schemas/AccountEmailInput' }
+                password: { $ref: '#/components/schemas/LoginPasswordInput' }
+            example: { email: jimin@example.com, password: 'correct horse battery staple' }
+      responses:
+        '200':
+          description: 로그인 성공 및 액세스 토큰 발급
+          headers:
+            Cache-Control: { $ref: '#/components/headers/AuthCacheControl' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResult' }
+              example:
+                accessToken: eyJhbGciOiJIUzI1NiJ9.example.signature
+                tokenType: Bearer
+                expiresIn: 1800
+                user: { id: 17010000-0000-4000-8000-000000000001, email: jimin@example.com, nickname: 지민 }
+        '400': { $ref: '#/components/responses/AuthValidationError' }
+        '401':
+          description: INVALID_CREDENTIALS. 등록되지 않은 이메일과 잘못된 비밀번호에 같은 응답을 반환한다.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/AuthCacheControl' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+              example: { code: INVALID_CREDENTIALS, message: 이메일 또는 비밀번호를 확인해 주세요. }
+        '429':
+          description: TOO_MANY_REQUESTS. 클라이언트 주소당 분당 로그인 시도 10회를 초과했다.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/AuthCacheControl' }
+            Retry-After:
+              description: 다음 로그인 시도까지 기다릴 시간(초)
+              schema: { type: integer, minimum: 1 }
+              example: 30
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+              example: { code: TOO_MANY_REQUESTS, message: 잠시 후 다시 시도해 주세요. }
+        '415': { $ref: '#/components/responses/AuthUnsupportedMediaType' }
+  /auth/me:
+    get:
+      tags: [계정]
+      summary: 내 계정 조회
+      operationId: getMyAccount
+      security: [{ AccountBearer: [] }]
+      responses:
+        '200':
+          description: 토큰에 연결된 계정
+          headers:
+            Cache-Control: { $ref: '#/components/headers/AuthCacheControl' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+              example: { id: 17010000-0000-4000-8000-000000000001, email: jimin@example.com, nickname: 지민 }
+        '401':
+          description: INVALID_TOKEN. 액세스 토큰이 없거나 유효하지 않거나 만료되었다.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/AuthCacheControl' }
+            WWW-Authenticate:
+              schema: { type: string, const: Bearer }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+              example: { code: INVALID_TOKEN, message: 유효한 액세스 토큰이 필요합니다. }
   /tables:
     post:
       tags: [테이블]
@@ -357,11 +487,17 @@ paths:
         default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
+    AccountBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
     GuestCookie:
       type: apiKey
       in: cookie
       name: COGOM_GUEST
   headers:
+    AuthCacheControl:
+      schema: { type: string, const: no-store }
     GuestCookie:
       description: 신규 또는 갱신 세션에만 발급하는 게스트 쿠키
       schema: { type: string }
@@ -382,6 +518,16 @@ components:
       required: true
       schema: { type: string, format: uuid }
   responses:
+    AuthValidationError:
+      description: VALIDATION_ERROR. JSON이 없거나 잘못되었거나, 본문이 객체가 아니거나, 필드가 누락되었거나, 값이 문자열이 아니거나, 필드 제약을 위반했거나, 정의되지 않은 필드가 있다.
+      headers:
+        Cache-Control: { $ref: '#/components/headers/AuthCacheControl' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/AuthError' }
+          example: { code: VALIDATION_ERROR, message: 올바른 이메일 주소를 입력해 주세요. }
+    AuthUnsupportedMediaType:
+      description: Content-Type이 application/json이 아니면 프레임워크가 415를 반환한다.
     Snapshot:
       description: 요청 적용 후 테이블 전체 상태
       content:
@@ -459,6 +605,44 @@ components:
       description: 400 INVALID_INPUT, 403 ORIGIN_FORBIDDEN, 429 RATE_LIMITED 또는 500 INTERNAL_ERROR
       content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
   schemas:
+    AccountEmailInput:
+      type: string
+      description: 앞뒤 공백을 제거하고 소문자로 변환한다. 최대 254자이며 @ 앞 부분은 최대 64자다. 도메인에 점이 포함된 ASCII 이메일 주소여야 한다.
+    SignupPasswordInput:
+      type: string
+      minLength: 15
+      maxLength: 128
+      description: 유니코드 코드 포인트 기준 15~128개다. 대소문자와 공백을 포함한 입력값을 그대로 사용하고 Argon2id로 해시해 저장한다.
+    LoginPasswordInput:
+      type: string
+      minLength: 1
+      maxLength: 128
+      description: 유니코드 코드 포인트 기준 1~128개다. 대소문자와 공백을 포함한 입력값을 그대로 사용한다.
+    AccountNicknameInput:
+      type: string
+      description: 앞뒤 공백을 제거한 뒤 UTF-16 코드 단위 기준 1~16개여야 한다.
+    Account:
+      type: object
+      required: [id, email, nickname]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email, maxLength: 254 }
+        nickname: { type: string, minLength: 1, maxLength: 16 }
+    LoginResult:
+      type: object
+      required: [accessToken, tokenType, expiresIn, user]
+      properties:
+        accessToken: { type: string }
+        tokenType: { type: string, const: Bearer }
+        expiresIn: { type: integer, const: 1800, description: 액세스 토큰 유효 시간(초) }
+        user: { $ref: '#/components/schemas/Account' }
+    AuthError:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
     Health:
       type: object
       required: [status, serverNow]

@@ -1,6 +1,16 @@
 spring:
   application:
     name: cogom-api
+  datasource:
+    url: "${COGOM_DB_URL:jdbc:h2:file:./data/cogom}"
+    username: sa
+    password: ""
+  sql:
+    init:
+      mode: always
 server:
   address: 127.0.0.1
   port: 8080
+cogom:
+  auth:
+    jwt-secret: "${COGOM_JWT_SECRET:}"
