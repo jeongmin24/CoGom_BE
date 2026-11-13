@@ -2,3 +2,6 @@ target/
 /data/
 .idea/
 *.iml
+
+# 배포용 비밀 값
+.env
