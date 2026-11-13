@@ -17,12 +17,13 @@ push(main) ─▶ GitHub Actions (x86_64 러너)
                 ├─ docker buildx                   (linux/arm64 + linux/amd64)
                 └─ push ─▶ ghcr.io/<owner>/<repo>:<commit sha>
                                │
-              SSH ─────────────┼──▶ EC2 c6g.2xlarge (Ubuntu, ARM64)  ~/cogom
+              SSH ─────────────┼──▶ EC2 (Ubuntu, ARM64)  ~/cogom
                                ▼        ├─ cogom-api  (Spring Boot, 8080: HTTP + WebSocket)
                         docker compose  └─ cogom-db   (PostgreSQL 17, 볼륨 cogom_pgdata, 외부 미노출)
 ```
 
-- **배포 대상**은 ARM64 서버 한 대이고, 백엔드와 PostgreSQL을 같은 Compose 프로젝트로 띄웁니다.
+- **배포 대상**은 ARM64 서버 한 대이고, 백엔드와 PostgreSQL을 같은 Compose 프로젝트로 띄웁니다. 계획 사양은 `c6g.2xlarge`이며, 백엔드와 DB만 실행한다면 `t4g.small`(2GiB)에서도 동작합니다.
+- **프런트엔드**는 Vercel에 배포하고, EC2의 Caddy가 같은 도메인에서 화면과 API를 함께 제공합니다([1-5](#1-5-도메인-caddy-리버스-프록시-https-운영-공개-전-필수)). 화면과 API를 다른 주소로 분리할 때의 절차는 [5장](#5-프런트엔드vercel-연결)에 있습니다.
 - **빌드**는 GitHub 호스티드 러너에서 수행합니다. 추가 서버(c6g.2xlarge)를 빌드·테스트 전용으로 쓰는 방법은 [3-3](#3-3-arm64-빌드-방식과-대안)에 있습니다.
 - 파이프라인은 Jenkins 없이 GitHub Actions만 사용합니다.
 
@@ -39,8 +40,8 @@ push(main) ─▶ GitHub Actions (x86_64 러너)
 | SSH | SSH | 22 | `0.0.0.0/0` | GitHub 호스티드 러너의 IP는 고정되지 않아 IP 제한이 어렵습니다. 키 인증만 허용합니다(1-4). |
 | HTTP | HTTP | 80 | `0.0.0.0/0`, `::/0` | HTTPS 리다이렉트와 인증서 발급용 |
 | HTTPS | HTTPS | 443 | `0.0.0.0/0`, `::/0` | 서비스 트래픽 |
-| Spring Boot | 사용자 지정 TCP | 8080 | **내 IP** | 초기 동작 확인용. Nginx를 붙인 뒤 이 규칙을 삭제합니다. |
-| WebSocket | 추가 규칙 없음 | | | `/ws/study-room`은 HTTP와 같은 포트(8080, Nginx 뒤에서는 443)를 씁니다. |
+| Spring Boot | 사용자 지정 TCP | 8080 | **내 IP** | 초기 동작 확인용. Caddy를 붙인 뒤 이 규칙을 삭제합니다. |
+| WebSocket | 추가 규칙 없음 | | | `/ws/study-room`은 HTTP와 같은 포트(8080, Caddy 뒤에서는 443)를 씁니다. |
 | PostgreSQL | **규칙을 만들지 않음** | 5432 | | 아래 설명 참고 |
 
 - **PostgreSQL 외부 접근 차단**은 두 겹으로 적용됩니다. 보안 그룹에 5432 규칙이 없고, `docker-compose.yml`의 `db` 서비스에 `ports`가 없어 호스트에도 포트가 열리지 않습니다. DB에 접속해야 하면 SSH로 들어가 `docker exec -it cogom-db psql -U cogom`을 사용합니다.
@@ -58,7 +59,7 @@ ssh -i <키페어>.pem ubuntu@<EC2 퍼블릭 IP>
 uname -m                    # aarch64 여야 합니다
 dpkg --print-architecture   # arm64 여야 합니다
 lsb_release -ds             # Ubuntu 22.04 또는 24.04 LTS
-nproc && free -h            # 8 vCPU, 약 16GiB
+nproc && free -h            # c6g.2xlarge 는 8 vCPU / 약 16GiB, t4g.small 은 2 vCPU / 약 2GiB
 df -h /                     # 이미지와 DB 볼륨용으로 여유 20GB 이상 권장
 timedatectl                 # 시간 동기화 확인 (JWT 만료 검증에 영향)
 ```
@@ -66,6 +67,13 @@ timedatectl                 # 시간 동기화 확인 (JWT 만료 검증에 영�
 - `x86_64`가 나오면 인스턴스 유형이나 AMI를 잘못 고른 것입니다. c6g 계열은 **64비트(Arm)** AMI로만 실행됩니다.
 - 사용하는 이미지(`eclipse-temurin:21-jre`, `postgres:17`)는 모두 `linux/arm64`를 공식 지원합니다.
 - 이후 직접 추가하는 이미지나 네이티브 모듈(tree-sitter 등)은 arm64 빌드 제공 여부를 먼저 확인하세요. `docker manifest inspect <이미지>` 출력에 `arm64`가 있어야 합니다.
+
+메모리가 4GiB 미만인 인스턴스(`t4g.small` 등)에서는 스왑을 추가합니다.
+
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
 
 ### 1-3. Docker와 Docker Compose 설치
 
@@ -123,60 +131,93 @@ sudo sshd -T | grep -E '^(passwordauthentication|permitrootlogin)'
 # passwordauthentication no / permitrootlogin without-password(또는 no) 여야 합니다
 ```
 
-### 1-5. Nginx 리버스 프록시와 HTTPS (운영 공개 전 필수)
+### 1-5. 도메인, Caddy 리버스 프록시, HTTPS (운영 공개 전 필수)
 
-백엔드의 WebSocket 핸들러는 허용 출처가 개발 주소(`localhost:5173`)로 고정되어 있어, 운영에서는 **프런트엔드와 같은 출처**로 접속해야 연결됩니다. Nginx 한 곳에서 FE 정적 파일을 제공하고 `/api`와 `/ws`를 백엔드로 넘기면 조건이 충족됩니다.
+Vercel이 제공하는 프런트엔드 페이지는 HTTPS입니다. 브라우저는 HTTPS 페이지에서 `http://`나 `ws://` 주소로 보내는 요청을 차단하므로, 백엔드도 도메인과 HTTPS 인증서가 필요합니다. 백엔드 컨테이너는 HTTP(8080)만 받으므로 EC2의 Caddy가 HTTPS를 받아 넘깁니다.
+
+운영 구성은 **주소 하나로 화면과 API를 함께 제공**합니다. 사용자는 도메인으로 접속하고, Caddy가 경로에 따라 나눠 보냅니다.
+
+| 경로 | 보내는 곳 |
+| --- | --- |
+| `/api/*`, `/ws/*` | 백엔드 컨테이너 `127.0.0.1:8080` |
+| 그 밖의 모든 경로 | Vercel 프런트엔드 `https://<프런트>.vercel.app` |
+
+화면과 API의 출처가 같아 CORS 설정이 필요 없습니다. 현재 운영 값은 도메인 `곰터디위드미.서버.한국`, 프런트엔드 `co-gom-fe.vercel.app`입니다.
+
+**도메인 연결**
+
+도메인 DNS 관리 화면에서 A 레코드 값을 EC2 탄력적 IP로 등록합니다. 전파 여부는 `nslookup <도메인>`으로 확인합니다. 탄력적 IP가 나와야 인증서를 발급할 수 있습니다.
+
+한글 주소는 설정 파일에 퓨니코드로 적어야 합니다. 다음 명령으로 변환합니다.
 
 ```bash
-sudo apt-get install -y nginx
-sudo tee /etc/nginx/sites-available/cogom > /dev/null <<'NGINX'
-server {
-    listen 80;
-    server_name <도메인>;
+python3 -c "print('곰터디위드미.서버.한국'.encode('idna').decode())"
+# xn--jb0b73m1el5y7zommo.xn--hk3b17f.xn--3e0b707e
+```
 
-    root /var/www/cogom;          # CoGom_FE 의 dist 내용을 여기에 올립니다
-    index index.html;
+**Caddy 설치**
 
-    location / {
-        try_files $uri /index.html;
-    }
+```bash
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt-get update && sudo apt-get install -y caddy
+```
 
-    location /api/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
+**프록시 설정**
 
-    location /ws/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 3600s;   # 유휴 WebSocket 이 60초 만에 끊기지 않게 합니다
-    }
+`/etc/caddy/Caddyfile`을 다음 내용으로 바꿉니다.
+
+```
+<퓨니코드 도메인> {
+	@backend path /api/* /ws/*
+	reverse_proxy @backend 127.0.0.1:8080
+
+	reverse_proxy https://<프런트>.vercel.app {
+		header_up Host {upstream_hostport}
+		header_up -X-Forwarded-Host
+	}
 }
-NGINX
-sudo ln -sf /etc/nginx/sites-available/cogom /etc/nginx/sites-enabled/cogom
-sudo nginx -t && sudo systemctl reload nginx
 ```
-
-HTTPS 인증서는 도메인의 A 레코드를 탄력적 IP로 연결한 뒤 발급합니다.
 
 ```bash
-sudo apt-get install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d <도메인>
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+sudo systemctl reload caddy
+sudo journalctl -u caddy -n 30 --no-pager     # "certificate obtained successfully" 확인
 ```
 
-Nginx 적용 후 마무리합니다.
+Caddy가 다음을 자동으로 처리합니다.
+
+- **인증서:** Let's Encrypt 인증서를 발급하고 만료 전에 갱신합니다. Caddy를 실행하면 Let's Encrypt 약관에 동의한 것으로 처리됩니다.
+- **리다이렉트:** `http://` 요청을 `https://`로 넘깁니다.
+- **WebSocket:** 별도 설정 없이 전달하며 유휴 연결을 끊지 않습니다.
+- **전달 헤더:** `X-Forwarded-For`, `X-Forwarded-Proto`를 백엔드에 넘깁니다.
+
+**확인**
+
+```bash
+curl https://<퓨니코드 도메인>/api/v1/health     # {"status":"UP",...}
+```
+
+브라우저에서 `https://<도메인>`을 열어 화면이 뜨는지, 회원가입과 스터디룸 입장이 되는지 확인합니다.
+
+**8080 직접 접근 차단**
 
 1. GitHub Repository variable `APP_BIND`를 `127.0.0.1`로 등록하고 다시 배포합니다(4-2).
 2. 보안 그룹에서 8080 규칙을 삭제합니다.
 
-Compose에 설정된 `SERVER_FORWARD_HEADERS_STRATEGY=native`가 Nginx의 `X-Forwarded-*` 헤더를 반영합니다. 이 설정이 없으면 HTTPS에서 WebSocket 출처 판정이 실패하고, 로그인 시도 제한이 모든 사용자를 같은 IP로 취급합니다.
+Compose에 설정된 `SERVER_FORWARD_HEADERS_STRATEGY=native`가 Caddy의 `X-Forwarded-*` 헤더를 반영합니다. 이 설정이 없으면 로그인 시도 제한이 모든 사용자를 같은 IP로 취급합니다.
+
+**주의 사항**
+
+- **Vercel 보안 확인 화면:** Vercel은 화면 요청이 모두 EC2 한 곳에서 오는 것으로 봅니다. 그래서 첫 접속 때 `Vercel Security Checkpoint` 확인을 거친 뒤 화면이 뜰 수 있습니다. 브라우저는 자동으로 통과하지만 `curl` 같은 도구는 403을 받습니다. 접속자가 늘어 차단이 잦아지면 아래의 분리 구성으로 바꿉니다.
+- **경로 새로고침:** `/` 외의 경로는 Vercel이 처리합니다. 프런트엔드가 주소 경로를 바꾸는 라우팅을 쓰면 Vercel에 rewrite 설정이 필요합니다.
+
+**화면과 API를 분리하는 구성**
+
+사용자가 Vercel 주소로 직접 접속하고, 이 서버는 API와 WebSocket만 받는 구성입니다. Caddyfile에서 Vercel로 넘기는 `reverse_proxy` 블록을 빼고 `reverse_proxy 127.0.0.1:8080` 한 줄만 둡니다. 출처가 달라지므로 [5장](#5-프런트엔드vercel-연결)의 설정이 필요합니다.
 
 ---
 
@@ -208,6 +249,7 @@ Compose에 설정된 `SERVER_FORWARD_HEADERS_STRATEGY=native`가 Nginx의 `X-For
 | `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` | `application.yml`의 H2용 `sa` 계정을 덮어씀 |
 | `COGOM_JWT_SECRET` | 재시작 후에도 토큰이 유효하도록 고정 서명 키 지정 |
 | `SERVER_ADDRESS=0.0.0.0` | `application.yml`의 `127.0.0.1` 바인딩을 컨테이너에서 해제 |
+| `COGOM_ALLOWED_ORIGINS` | 다른 출처의 프런트엔드 허용 목록. REST API의 CORS와 WebSocket 출처 검사에 함께 적용 |
 
 `pom.xml`에는 PostgreSQL JDBC 드라이버(`org.postgresql:postgresql`, runtime)를 추가했습니다. H2 의존성은 그대로라서 로컬의 `mvn spring-boot:run`은 이전과 같이 동작합니다.
 
@@ -286,7 +328,7 @@ cd ~/cogom && ./deploy.sh ghcr.io/<owner>/<repo 소문자>:<되돌릴 커밋 SHA
 | `EC2_HOST` | 필수 | 서버 주소 | EC2 콘솔 → 인스턴스 → **퍼블릭 IPv4 주소**(탄력적 IP) 또는 연결한 도메인 |
 | `EC2_SSH_KEY` | 필수 | 배포용 개인 키 전체 | 1-4에서 만든 `cogom_deploy_key` 파일 내용. `-----BEGIN OPENSSH PRIVATE KEY-----`부터 `-----END OPENSSH PRIVATE KEY-----`까지 줄바꿈 포함 |
 | `DB_PASSWORD` | 필수 | PostgreSQL 비밀번호 | `openssl rand -hex 24`로 새로 생성 |
-| `JWT_SECRET` | 필수 | JWT 서명 키 | `openssl rand -base64 48`로 새로 생성. 디코딩 시 32바이트 이상인 표준 Base64여야 함 |
+| `JWT_SECRET` | 필수 | JWT 서명 키 | `openssl rand -base64 48`로 새로 생성한 64자. 아래 주의 사항 참고 |
 | `EC2_USER` | 선택 | SSH 사용자 | 생략하면 `ubuntu`. Ubuntu AMI의 기본 사용자 |
 | `EC2_KNOWN_HOSTS` | 권장 | 서버 호스트 키 | 로컬에서 `ssh-keyscan <EC2_HOST>` 출력 전체 |
 
@@ -301,15 +343,24 @@ pbcopy < cogom_deploy_key
 
 - **`DB_PASSWORD`는 영문과 숫자만 사용하세요.** 작은따옴표가 들어가면 `.env` 생성이 깨집니다. `openssl rand -hex`의 출력은 안전합니다.
 - **`DB_PASSWORD`는 첫 배포 이후 바꾸지 마세요.** PostgreSQL은 볼륨을 처음 초기화할 때만 비밀번호를 설정합니다. 나중에 Secret만 바꾸면 앱이 DB에 접속하지 못합니다. 변경하려면 먼저 `docker exec -it cogom-db psql -U cogom -c "ALTER USER cogom PASSWORD '<새 값>';"`을 실행한 뒤 Secret을 고칩니다.
+- **`JWT_SECRET`은 명령의 출력을 그대로 써야 합니다.** 디코딩 시 32바이트 이상인 표준 Base64만 허용됩니다. 직접 지은 문자열이나 길이가 4의 배수가 아닌 값을 넣으면 백엔드가 시작하지 못합니다. Windows에서는 아래 명령으로 올바른 값을 클립보드에 바로 복사할 수 있습니다.
+
+  ```powershell
+  $b = New-Object byte[] 48; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b) | Set-Clipboard
+  ```
+
 - **`JWT_SECRET`을 바꾸면** 이미 발급된 토큰이 모두 무효가 됩니다.
 - **`EC2_KNOWN_HOSTS`를 생략하면** 워크플로가 접속 시점의 호스트 키를 그대로 신뢰합니다. 등록해 두면 서버 위장 공격을 막을 수 있습니다.
 - GHCR 푸시와 pull은 워크플로가 자동 발급받는 `GITHUB_TOKEN`을 사용합니다. 별도의 토큰 Secret은 필요 없습니다.
 
 ### 4-2. Variables 탭 → New repository variable (모두 선택)
 
+Variable을 바꾼 뒤에는 Deploy 워크플로를 다시 실행해야 서버에 반영됩니다.
+
 | 이름 | 기본값 | 용도 |
 | --- | --- | --- |
-| `APP_BIND` | `0.0.0.0` | Nginx 적용 후 `127.0.0.1`로 변경해 8080 직접 접근 차단 |
+| `ALLOWED_ORIGINS` | 없음 | 프런트엔드 주소. 쉼표로 여러 개 지정. 예) `https://cogom.vercel.app` (5장) |
+| `APP_BIND` | `0.0.0.0` | Caddy 적용 후 `127.0.0.1`로 변경해 8080 직접 접근 차단 |
 | `APP_PORT` | `8080` | 호스트에 게시할 포트 |
 | `DB_NAME` | `cogom` | 데이터베이스 이름. 첫 배포 이후 변경하지 않음 |
 | `DB_USER` | `cogom` | 데이터베이스 사용자. 첫 배포 이후 변경하지 않음 |
@@ -343,4 +394,51 @@ ssh ubuntu@<EC2_HOST> 'cd ~/cogom && docker compose ps'   # 두 컨테이너 모
 | `exec format error` | 이미지 아키텍처 불일치. `docker image inspect <이미지> --format '{{.Architecture}}'`가 `arm64`인지 확인 |
 | `app`이 unhealthy | 서버에서 `docker compose logs app`. DB 비밀번호 불일치나 `JWT_SECRET` 형식 오류가 흔한 원인 |
 | `password authentication failed` | 첫 배포 이후 `DB_PASSWORD`를 바꾼 경우. 4-1의 변경 절차 참고 |
-| WebSocket 403 | FE와 백엔드의 출처가 다름. 1-5의 Nginx 구성으로 같은 출처에서 제공 |
+| `COGOM_JWT_SECRET에는 32바이트 이상의 키를...` | `JWT_SECRET` 형식 오류. 4-1의 명령으로 다시 생성해 등록 |
+| 브라우저 콘솔의 CORS 오류, WebSocket 403 | `ALLOWED_ORIGINS`에 프런트엔드 주소가 없거나 다름. 프로토콜 포함, 끝 슬래시 없이 등록했는지 확인(5장) |
+| 브라우저 콘솔의 Mixed Content 오류 | `VITE_API_BASE_URL`이 `http://`로 시작함. HTTPS 주소로 등록(1-5, 5장) |
+
+---
+
+## 5. 프런트엔드(Vercel) 연결
+
+이 장은 사용자가 Vercel 주소로 직접 접속하는 분리 구성에만 해당합니다. 1-5의 기본 구성(같은 도메인)에서는 필요 없습니다. 분리 구성에서는 프런트엔드는 Vercel, 백엔드는 `https://api.<도메인>`에 있어 출처가 다릅니다. Vercel은 WebSocket을 중계하지 못하므로 브라우저가 백엔드에 직접 접속하며, 양쪽에 다음 설정이 필요합니다.
+
+| 위치 | 설정 | 값 |
+| --- | --- | --- |
+| 프런트엔드 (Vercel 환경 변수) | `VITE_API_BASE_URL` | `https://api.<도메인>` |
+| 백엔드 (GitHub Repository variable) | `ALLOWED_ORIGINS` | `https://<프로젝트>.vercel.app` |
+
+### 5-1. Vercel 배포
+
+1. [vercel.com](https://vercel.com)에 GitHub 계정으로 로그인하고 **Add New → Project**에서 `CoGom_FE` 저장소를 가져옵니다.
+2. 빌드 설정을 확인합니다. Framework Preset은 **Vite**, Build Command는 `npm run build`, Output Directory는 `dist`입니다.
+3. **Environment Variables**에 `VITE_API_BASE_URL`을 `https://api.<도메인>`으로 등록합니다. 끝에 슬래시는 붙이지 않습니다.
+4. **Deploy**를 누르고, 발급된 주소(`https://<프로젝트>.vercel.app`)를 확인합니다.
+
+`VITE_` 변수는 빌드할 때 코드에 포함됩니다. 값을 바꾸면 Vercel에서 다시 배포해야 반영됩니다.
+
+### 5-2. 백엔드에 프런트엔드 주소 허용
+
+1. GitHub 저장소 **Settings → Secrets and variables → Actions → Variables**에 `ALLOWED_ORIGINS`를 등록합니다. 값은 Vercel 주소이며 프로토콜을 포함하고 끝 슬래시는 뺍니다.
+2. 주소가 여러 개면 쉼표로 구분합니다. 예) `https://cogom.vercel.app,https://cogom.example.com`
+3. Deploy 워크플로를 다시 실행합니다.
+
+등록한 주소는 REST API의 CORS와 WebSocket(`/ws/study-room`) 출처 검사에 함께 적용됩니다. 등록하지 않은 출처의 요청은 403으로 거부됩니다.
+
+### 5-3. 확인
+
+```bash
+curl -i -X OPTIONS https://api.<도메인>/api/v1/auth/login \
+  -H "Origin: https://<프로젝트>.vercel.app" \
+  -H "Access-Control-Request-Method: POST" \
+  -H "Access-Control-Request-Headers: content-type"
+```
+
+응답이 200이고 `Access-Control-Allow-Origin` 헤더에 프런트엔드 주소가 있으면 정상입니다. 이후 Vercel 페이지에서 회원가입, 로그인, 스터디룸 입장을 확인합니다.
+
+### 5-4. 주의 사항
+
+- **미리보기 배포:** Vercel은 브랜치와 PR마다 다른 주소를 만듭니다. `ALLOWED_ORIGINS`에 없는 주소에서는 API 호출이 실패합니다. 운영 주소(Production)에서 확인하세요.
+- **사용자 지정 도메인:** Vercel 프로젝트의 **Settings → Domains**에서 연결합니다. 연결한 주소도 `ALLOWED_ORIGINS`에 추가해야 합니다.
+- **로컬 개발:** `VITE_API_BASE_URL`을 비워 두면 Vite 프록시를 통해 로컬 백엔드를 사용합니다. 백엔드의 `COGOM_ALLOWED_ORIGINS`를 지정하지 않으면 기본값으로 `localhost:5173`이 허용됩니다.

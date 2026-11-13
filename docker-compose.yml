@@ -47,6 +47,8 @@ services:
       SPRING_DATASOURCE_USERNAME: ${DB_USER:-cogom}
       SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 를 .env 에 설정하세요}
       COGOM_JWT_SECRET: ${JWT_SECRET:?JWT_SECRET 을 .env 에 설정하세요}
+      # 다른 출처의 프런트엔드(Vercel 등)를 허용할 때 쉼표로 구분해 지정한다. 비우면 같은 출처만 허용한다.
+      COGOM_ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       SERVER_ADDRESS: 0.0.0.0
       # Nginx 뒤에서 X-Forwarded-* 를 신뢰한다. HTTPS 동일 출처 판정(WebSocket)과
       # 로그인 시도 제한의 클라이언트 IP 식별에 필요하다.
